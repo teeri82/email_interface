@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "retry_count": 3,
     "retry_interval_seconds": 30,
     "protocol_version": "1.0",
+    "email_max_lifetime_days": 30,
 }
 
 

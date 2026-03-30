@@ -34,6 +34,7 @@ After the **sender** node has received confirmation that all protocol obligation
 | **DATA with attachment** | ACK received **AND** ATTACH_ACK received → both confirmations fulfilled |
 | **NACK'd DATA** | NACK received → outbound state becomes `NACKED` (message rejected, safe to remove) |
 | **FAILED DATA** | All retries exhausted → outbound state becomes `FAILED` (giving up, clean up) |
+| **Expired DATA** | Email age exceeds `email_max_lifetime_days` — deleted regardless of state (catch-all for orphaned emails that never received any response) |
 
 ### 2.2 Identification of the Sent Email
 
@@ -50,6 +51,19 @@ The `message_id` from the envelope uniquely identifies the email to delete.
 2. **Never delete emails that are not yet in a terminal state** — only delete when state is `ACKNOWLEDGED`, `NACKED`, or `FAILED`.
 3. **Best-effort deletion** — if the IMAP delete fails (connection error, email already gone), log a warning but do NOT fail the state transition. Deletion is a cleanup optimisation, not a protocol requirement.
 4. **Attachment messages require both confirmations** — do not delete a DATA+attachment email after only the ACK; wait for ATTACH_ACK too.
+5. **Lifetime-based expiry** — if an email has been in the mailbox longer than `email_max_lifetime_days` (configurable, default 30), it is deleted unconditionally. This prevents orphaned emails from accumulating when an ACK is never received (e.g. the receiver endpoint is permanently offline).
+
+### 2.4 Configuration
+
+Add to `config.json`:
+
+```json
+"email_max_lifetime_days": 30
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `email_max_lifetime_days` | int | 30 | Maximum age in days for a sent DATA email in the mailbox. Emails older than this are deleted regardless of acknowledgement state. Set to `0` to disable lifetime-based expiry. |
 
 ## 3. Module Design
 
@@ -80,6 +94,17 @@ cleanup_acknowledged(config, state) -> int
 - Marks cleaned messages in state (new field `email_deleted: true`) to avoid re-attempting
 - Returns count of emails deleted
 
+```
+cleanup_expired(config, state) -> int
+```
+
+- Scans all outbound messages where `email_deleted` is not true
+- Compares `created_at` against current time minus `email_max_lifetime_days`
+- Deletes any email older than the configured lifetime, regardless of state
+- Marks `email_deleted: true` and transitions state to `FAILED` if not already terminal
+- Skipped entirely if `email_max_lifetime_days` is `0`
+- Returns count of emails deleted
+
 ### 3.2 State Store Changes
 
 Add to outbound records:
@@ -94,7 +119,7 @@ Add to outbound records:
 | `main.py` → `_handle_inbound_attach_ack()` | Set `attach_ack_received = True`, then call cleanup |
 | `main.py` → `_handle_inbound_nack()` | After setting `NACKED`, call cleanup |
 | `main.py` → `retry_check()` | After setting `FAILED`, call cleanup |
-| `main.py` → `BackgroundWorker.run()` | Optionally run `cleanup_acknowledged()` periodically as a catch-all |
+| `main.py` → `BackgroundWorker.run()` | Optionally run `cleanup_acknowledged()` and `cleanup_expired()` periodically as a catch-all |
 
 ## 4. Test Plan
 
@@ -166,6 +191,22 @@ Add to outbound records:
 | **Setup** | Misconfigure IMAP host temporarily. |
 | **Action** | Trigger cleanup. |
 | **Expected** | Returns False, error logged, state NOT corrupted, `email_deleted` stays false (will retry later). |
+
+### Test 4.10 — Lifetime expiry: old email deleted even without ACK
+
+| Field | Value |
+|---|---|
+| **Setup** | Send a DATA message from test1. Manually backdate `created_at` in `state.json` to exceed `email_max_lifetime_days`. |
+| **Action** | Run `cleanup_expired()`. |
+| **Expected** | Email deleted from mailbox. Outbound state → `FAILED`, `email_deleted = true`. |
+
+### Test 4.11 — Lifetime expiry disabled when set to 0
+
+| Field | Value |
+|---|---|
+| **Setup** | Set `email_max_lifetime_days: 0` in config. Backdate a message. |
+| **Action** | Run `cleanup_expired()`. |
+| **Expected** | No emails deleted. Returns 0. |
 
 ## 5. Development Process
 
