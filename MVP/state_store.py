@@ -97,6 +97,22 @@ class StateStore:
             if rec["state"] == state
         ]
 
+    def mark_email_deleted(self, message_id: str, deleted: bool = True):
+        """Mark whether the sent email has been deleted from the shared mailbox."""
+        if message_id in self.data["outbound"]:
+            self.data["outbound"][message_id]["email_deleted"] = deleted
+            self.data["outbound"][message_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._save()
+            logger.info("Outbound message %s email_deleted=%s", message_id, deleted)
+
+    def set_attach_ack_received(self, message_id: str):
+        """Record that ATTACH_ACK has been received for an outbound message."""
+        if message_id in self.data["outbound"]:
+            self.data["outbound"][message_id]["attach_ack_received"] = True
+            self.data["outbound"][message_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+            self._save()
+            logger.info("Outbound message %s attach_ack_received=True", message_id)
+
     # --- Inbound ---
 
     def is_duplicate(self, message_id: str) -> bool:

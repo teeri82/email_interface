@@ -52,6 +52,7 @@ from state_store import (
     IN_ATTACH_DOWNLOADED,
 )
 from transport import send_email, fetch_protocol_emails
+from cleanup import delete_sent_email, cleanup_acknowledged, cleanup_expired
 
 # Subdirectories for attachments
 OUT_DIR = "out"
@@ -129,11 +130,11 @@ def process_inbound(config: dict, state: StateStore):
         if msg_type == MSG_DATA:
             _handle_inbound_data(config, state, env)
         elif msg_type == MSG_ACK:
-            _handle_inbound_ack(state, env)
+            _handle_inbound_ack(config, state, env)
         elif msg_type == MSG_NACK:
-            _handle_inbound_nack(state, env)
+            _handle_inbound_nack(config, state, env)
         elif msg_type == MSG_ATTACH_ACK:
-            _handle_inbound_attach_ack(state, env)
+            _handle_inbound_attach_ack(config, state, env)
         else:
             app_log.warning("Unknown message type '%s' in message %s", msg_type, msg_id)
 
@@ -217,7 +218,7 @@ def _send_ack(config: dict, state: StateStore, original_env: dict):
         app_log.error("Failed to send ACK for message %s", msg_id)
 
 
-def _handle_inbound_ack(state: StateStore, env: dict):
+def _handle_inbound_ack(config: dict, state: StateStore, env: dict):
     """Process an inbound ACK — correlate with outbound message."""
     corr_id = env.get("correlation_id")
     sender = env["sender_endpoint_id"]
@@ -240,8 +241,14 @@ def _handle_inbound_ack(state: StateStore, env: dict):
     print(f"\n[ACK] Message {corr_id} acknowledged by {sender}")
     print("> ", end="", flush=True)
 
+    # Trigger cleanup: for text-only messages, delete the sent email now.
+    # For attachment messages, wait until ATTACH_ACK is also received.
+    envelope = outbound["envelope"]
+    if not envelope.get("has_attachment"):
+        _try_cleanup(config, state, corr_id)
 
-def _handle_inbound_nack(state: StateStore, env: dict):
+
+def _handle_inbound_nack(config: dict, state: StateStore, env: dict):
     """Process an inbound NACK — mark outbound as NACKED."""
     corr_id = env.get("correlation_id")
     sender = env["sender_endpoint_id"]
@@ -265,8 +272,11 @@ def _handle_inbound_nack(state: StateStore, env: dict):
     print(f"\n[NACK] Message {corr_id} rejected by {sender}: {reason}")
     print("> ", end="", flush=True)
 
+    # NACK means rejected — clean up the sent email
+    _try_cleanup(config, state, corr_id)
 
-def _handle_inbound_attach_ack(state: StateStore, env: dict):
+
+def _handle_inbound_attach_ack(config: dict, state: StateStore, env: dict):
     """Process an inbound ATTACH_ACK — the receiver downloaded our attachment."""
     corr_id = env.get("correlation_id")
     sender = env["sender_endpoint_id"]
@@ -285,9 +295,35 @@ def _handle_inbound_attach_ack(state: StateStore, env: dict):
         app_log.warning("Received ATTACH_ACK for unknown outbound message %s", corr_id)
         return
 
-    # Already ACKNOWLEDGED by the message ACK — this is an extra confirmation
+    # Record that the attachment has been downloaded
+    state.set_attach_ack_received(corr_id)
+
+    # Already ACKNOWLEDGED by the message ACK — this is the second confirmation
     print(f"\n[ATTACH_ACK] Attachment for message {corr_id[:8]}… downloaded by {sender}")
     print("> ", end="", flush=True)
+
+    # Both ACK and ATTACH_ACK received — now eligible for cleanup
+    _try_cleanup(config, state, corr_id)
+
+
+def _try_cleanup(config: dict, state: StateStore, message_id: str):
+    """Attempt to delete the sent email for an outbound message (best-effort).
+
+    Called when a message reaches a state where deletion is appropriate.
+    Failures are logged but never prevent state transitions.
+    """
+    record = state.get_outbound(message_id)
+    if record is None or record.get("email_deleted"):
+        return
+
+    my_id = config["endpoint_id"]
+    envelope = record["envelope"]
+    recipient_id = envelope["recipient_endpoint_id"]
+
+    success = delete_sent_email(config, message_id, my_id, recipient_id)
+    state.mark_email_deleted(message_id, success)
+    if success:
+        app_log.info("Sent email deleted for message %s", message_id)
 
 
 def _save_plain_message(msg_id: str, sender: str, payload: str):
@@ -329,6 +365,8 @@ def retry_check(config: dict, state: StateStore):
             app_log.warning("Message %s FAILED — max retries (%d) exhausted", msg_id, max_retries)
             print(f"\n[FAILED] Message {msg_id} — retries exhausted")
             print("> ", end="", flush=True)
+            # Clean up the sent email from the mailbox
+            _try_cleanup(config, state, msg_id)
             continue
 
         # Retry
@@ -375,6 +413,7 @@ class BackgroundWorker(threading.Thread):
     def run(self):
         interval = self.config.get("polling_interval_seconds", 10)
         app_log.info("Background worker started (poll every %ds)", interval)
+        cycle = 0
         while not self._stop_event.is_set():
             try:
                 process_inbound(self.config, self.state)
@@ -384,6 +423,14 @@ class BackgroundWorker(threading.Thread):
                 retry_check(self.config, self.state)
             except Exception as e:
                 app_log.error("Error in retry check: %s", e)
+            # Run periodic cleanup every 6 cycles (catch-all for missed deletions + expiry)
+            cycle += 1
+            if cycle % 6 == 0:
+                try:
+                    cleanup_acknowledged(self.config, self.state)
+                    cleanup_expired(self.config, self.state)
+                except Exception as e:
+                    app_log.error("Error in periodic cleanup: %s", e)
             self._stop_event.wait(interval)
 
     def stop(self):
