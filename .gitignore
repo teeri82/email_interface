@@ -1,0 +1,23 @@
+# ── Credentials & runtime config (match at any depth) ──
+**/config.json
+
+# ── Runtime artifacts (match at any depth) ──
+**/state.json
+**/*.log
+
+# ── Attachment directories (match at any depth) ──
+**/in/
+**/out/
+
+# ── Test instances (contain credentials & runtime data) ──
+MVP/test*/
+
+# ── Python ──
+**/__pycache__/
+*.pyc
+*.pyo
+
+# ── OS junk ──
+.DS_Store
+**/.DS_Store
+Thumbs.db

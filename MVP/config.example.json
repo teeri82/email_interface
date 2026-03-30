@@ -1,0 +1,18 @@
+{
+    "endpoint_id": "my-endpoint",
+    "email_address": "shared-email@gmail.com",
+    "email_password": "your-app-password",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "imap_host": "imap.gmail.com",
+    "imap_port": 993,
+    "peers": [
+        "peer-1",
+        "peer-2"
+    ],
+    "polling_interval_seconds": 10,
+    "ack_timeout_seconds": 60,
+    "retry_count": 3,
+    "retry_interval_seconds": 30,
+    "protocol_version": "1.0"
+}
