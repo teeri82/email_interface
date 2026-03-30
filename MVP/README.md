@@ -48,7 +48,8 @@ cp config.example.json config.json
     "ack_timeout_seconds": 60,
     "retry_count": 3,
     "retry_interval_seconds": 30,
-    "protocol_version": "1.0"
+    "protocol_version": "1.0",
+    "email_max_lifetime_days": 30
 }
 ```
 
@@ -246,6 +247,7 @@ Cleanup happens in two places:
 | `cleanup.py` | Mailbox cleanup — delete sent emails after protocol completion or expiry |
 | `config_loader.py` | Load and validate `config.json` |
 | `config.example.json` | Example configuration (safe to commit — no credentials) |
+| `regression_tests.py` | Regression test suite — 40 unit + 5 live tests |
 
 ## Known Limitations (MVP)
 
@@ -254,6 +256,22 @@ Cleanup happens in two places:
 - **Polling-based** — no push/IDLE support; latency depends on `polling_interval_seconds`.
 - **Attachment size** — limited by email provider caps and the hex-encoding overhead in `state.json`.
 - **Retry does not re-attach files** — retries resend the envelope JSON only (the original attachment is not re-sent).
+
+## Testing
+
+Run the regression test suite (unit tests — no credentials needed):
+
+```bash
+cd MVP && python3 regression_tests.py
+```
+
+Run with live IMAP/SMTP tests (requires `config.json` with valid credentials):
+
+```bash
+cd your-instance-dir && python3 /path/to/MVP/regression_tests.py --live
+```
+
+The suite covers config loading, envelope serialization, state store operations, import chain integrity, cleanup eligibility logic, and live send/fetch/delete round-trips.
 
 ## Security Note
 
