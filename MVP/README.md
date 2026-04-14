@@ -48,7 +48,8 @@ cp config.example.json config.json
     "ack_timeout_seconds": 60,
     "retry_count": 3,
     "retry_interval_seconds": 30,
-    "protocol_version": "1.0"
+    "protocol_version": "1.0",
+    "email_max_lifetime_days": 30
 }
 ```
 
@@ -60,6 +61,7 @@ cp config.example.json config.json
 | `polling_interval_seconds` | How often to check for new messages |
 | `ack_timeout_seconds` | How long to wait for an ACK before retrying |
 | `retry_count` | Maximum number of send retries |
+| `email_max_lifetime_days` | Auto-delete sent emails older than this (0 = disabled, default 30) |
 
 > **Gmail users:** Use an [App Password](https://support.google.com/accounts/answer/185833) — not your regular password. Enable IMAP in Gmail settings.
 
@@ -203,6 +205,21 @@ Each instance gets its own `state.json`, logs, `in/`, and `out/` directories.
 3. **Receiver operator** runs `dl <id>` → payload + attachment saved to `in/<msg_id>/`, **ATTACH_ACK** sent to sender.
 4. **Sender** receives `ATTACH_ACK` confirming the attachment was downloaded.
 
+### Email Cleanup (automatic)
+
+Sent DATA emails are automatically deleted from the shared mailbox once protocol obligations are fulfilled:
+
+- **Text-only messages** → deleted after ACK (or NACK)
+- **Attachment messages** → deleted after ACK **and** ATTACH_ACK (both required)
+- **Failed messages** → deleted after retries exhausted
+- **Orphaned messages** → deleted after `email_max_lifetime_days` (even without any response)
+
+Cleanup happens in two places:
+1. **Immediately** when a terminal state is reached (ACK, NACK, ATTACH_ACK, FAILED)
+2. **Periodically** via a background sweep every 6 poll cycles (catches missed deletions + expiry)
+
+> **Gmail note:** Self-to-self emails only appear in `[Gmail]/All Mail` (not INBOX). The cleanup module uses Gmail-compatible deletion (COPY to `[Gmail]/Trash` + EXPUNGE).
+
 ### Message Types
 
 | Type | Direction | Description |
@@ -227,8 +244,10 @@ Each instance gets its own `state.json`, logs, `in/`, and `out/` directories.
 | `envelope.py` | Message model, serialization, subject/header helpers |
 | `transport.py` | SMTP send (with MIME attachments) and IMAP fetch (with attachment extraction) |
 | `state_store.py` | JSON-backed persistent state tracking |
+| `cleanup.py` | Mailbox cleanup — delete sent emails after protocol completion or expiry |
 | `config_loader.py` | Load and validate `config.json` |
 | `config.example.json` | Example configuration (safe to commit — no credentials) |
+| `regression_tests.py` | Regression test suite — 40 unit + 5 live tests |
 
 ## Known Limitations (MVP)
 
@@ -236,8 +255,23 @@ Each instance gets its own `state.json`, logs, `in/`, and `out/` directories.
 - **No concurrent access** — `state.json` is not locked; running two instances from the same directory will corrupt state.
 - **Polling-based** — no push/IDLE support; latency depends on `polling_interval_seconds`.
 - **Attachment size** — limited by email provider caps and the hex-encoding overhead in `state.json`.
-- **No message deletion** — processed emails remain in the shared mailbox; manual cleanup is needed.
 - **Retry does not re-attach files** — retries resend the envelope JSON only (the original attachment is not re-sent).
+
+## Testing
+
+Run the regression test suite (unit tests — no credentials needed):
+
+```bash
+cd MVP && python3 regression_tests.py
+```
+
+Run with live IMAP/SMTP tests (requires `config.json` with valid credentials):
+
+```bash
+cd your-instance-dir && python3 /path/to/MVP/regression_tests.py --live
+```
+
+The suite covers config loading, envelope serialization, state store operations, import chain integrity, cleanup eligibility logic, and live send/fetch/delete round-trips.
 
 ## Security Note
 

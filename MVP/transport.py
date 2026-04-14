@@ -114,22 +114,45 @@ def fetch_protocol_emails(config: dict) -> list[dict]:
         _attachment_data: bytes   — raw file content
         _attachment_filename: str — original filename
 
-    Processed messages are deleted from the mailbox.
+    Processed messages are marked as read.  For ACK/NACK/ATTACH_ACK
+    emails (responses), the receiver moves them to Trash so they don't
+    accumulate.  Sent DATA emails are left for cleanup.py to handle
+    after the full protocol round-trip completes.
+
+    Gmail self-to-self emails only appear in ``[Gmail]/All Mail``
+    (not INBOX), so we search both folders.
     """
     my_id = config["endpoint_id"]
     envelopes: list[dict] = []
     delete_nums: list[bytes] = []
+    active_folder: str = "INBOX"
 
     try:
         with imaplib.IMAP4_SSL(config["imap_host"], config["imap_port"]) as mailbox:
             mailbox.login(config["email_address"], config["email_password"])
-            mailbox.select("INBOX")
 
-            # Search for emails with the protocol subject prefix
-            search_query = f'(SUBJECT "{SUBJECT_PREFIX}")'
-            status, msg_nums = mailbox.search(None, search_query)
-            if status != "OK" or not msg_nums[0]:
+            # Try INBOX first; fall back to [Gmail]/All Mail for self-to-self setups
+            found_messages = False
+            for folder in ["INBOX", '"[Gmail]/All Mail"']:
+                try:
+                    status, _ = mailbox.select(folder)
+                    if status != "OK":
+                        continue
+                except imaplib.IMAP4.error:
+                    continue
+                active_folder = folder
+                probe_status, probe_nums = mailbox.search(
+                    None, f'(SUBJECT "{SUBJECT_PREFIX}")'
+                )
+                if probe_status == "OK" and probe_nums[0]:
+                    found_messages = True
+                    break
+
+            if not found_messages:
                 return envelopes
+
+            # We already searched in the selected folder — use the results
+            msg_nums = probe_nums
 
             for num in msg_nums[0].split():
                 try:
@@ -212,13 +235,18 @@ def fetch_protocol_emails(config: dict) -> list[dict]:
                 except Exception as e:
                     logger.error("Error processing email #%s: %s", num, e)
 
-            # Delete only the messages we consumed
-            for num in delete_nums:
-                try:
-                    mailbox.store(num, "+FLAGS", "\\Deleted")
-                except Exception as e:
-                    logger.error("Failed to mark email #%s for deletion: %s", num, e)
-            mailbox.expunge()
+            # Delete consumed messages from the mailbox.
+            # Gmail ignores \Deleted+EXPUNGE on [Gmail]/All Mail, so we
+            # COPY to [Gmail]/Trash first (Gmail-compatible deletion).
+            if delete_nums:
+                trash_folder = '"[Gmail]/Trash"'
+                for num in delete_nums:
+                    try:
+                        mailbox.copy(num, trash_folder)
+                        mailbox.store(num, "+FLAGS", "\\Deleted")
+                    except Exception as e:
+                        logger.error("Failed to trash email #%s: %s", num, e)
+                mailbox.expunge()
 
     except imaplib.IMAP4.error as e:
         logger.error("IMAP error: %s", e)
